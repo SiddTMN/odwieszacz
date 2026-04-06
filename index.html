@@ -51,6 +51,11 @@
 
           <button class="primary-button" type="submit">Zapisz przypomnienie</button>
           <p class="small-note">Dane zapisują się lokalnie w tej przeglądarce.</p>
+
+          <div id="notifications-panel" class="notification-panel" hidden>
+            <p id="notifications-text" class="small-note notification-text"></p>
+            <button id="enable-notifications-button" class="secondary-button" type="button">Włącz powiadomienia</button>
+          </div>
         </form>
       </section>
 
@@ -97,6 +102,16 @@
   </main>
 
   <div id="action-toast" class="action-toast" hidden aria-live="polite" aria-atomic="true"></div>
+  <section id="reminder-alert" class="reminder-alert" hidden aria-live="assertive" aria-atomic="true">
+    <div class="reminder-alert-title" id="reminder-alert-title">Przypomnienie</div>
+    <p class="reminder-alert-note" id="reminder-alert-note"></p>
+    <div class="reminder-alert-actions">
+      <button class="primary-button" type="button" id="alert-done-button">Zrobione</button>
+      <button class="action-button" type="button" id="alert-snooze-5-button">Odłóż 5 min</button>
+      <button class="action-button" type="button" id="alert-snooze-15-button">Odłóż 15 min</button>
+      <button class="action-button" type="button" id="alert-snooze-60-button">Odłóż 1 godz.</button>
+    </div>
+  </section>
 
   <template id="reminder-template">
     <article class="reminder-card">

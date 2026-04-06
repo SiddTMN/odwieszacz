@@ -4,6 +4,8 @@ const SETTINGS_KEY = 'odwieszacz-settings-v1';
 const NOW_WINDOW_MINUTES = 15;
 const checklistItems = ['telefon', 'klucze', 'portfel', 'dokumenty', 'leki'];
 const DONE_RETENTION_DAYS = 7;
+const DUE_CHECK_INTERVAL_MS = 15000;
+const MAX_LATE_NOTIFICATION_MS = 6 * 60 * 60 * 1000;
 
 const form = document.getElementById('reminder-form');
 const titleInput = document.getElementById('title');
@@ -21,6 +23,16 @@ const clearOldDoneButton = document.getElementById('clear-old-done-button');
 const donePanel = document.getElementById('done-panel');
 const doneSummary = document.getElementById('done-summary');
 const actionToast = document.getElementById('action-toast');
+const notificationsPanel = document.getElementById('notifications-panel');
+const notificationsText = document.getElementById('notifications-text');
+const enableNotificationsButton = document.getElementById('enable-notifications-button');
+const reminderAlert = document.getElementById('reminder-alert');
+const reminderAlertTitle = document.getElementById('reminder-alert-title');
+const reminderAlertNote = document.getElementById('reminder-alert-note');
+const alertDoneButton = document.getElementById('alert-done-button');
+const alertSnooze5Button = document.getElementById('alert-snooze-5-button');
+const alertSnooze15Button = document.getElementById('alert-snooze-15-button');
+const alertSnooze60Button = document.getElementById('alert-snooze-60-button');
 
 const listNow = document.getElementById('list-now');
 const listToday = document.getElementById('list-today');
@@ -35,6 +47,9 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let currentAudioDataUrl = '';
 let toastTimeoutId = null;
+let dueCheckIntervalId = null;
+let alertQueue = [];
+let currentAlertReminderId = null;
 
 initializeApp();
 
@@ -44,8 +59,12 @@ function initializeApp() {
   bindEvents();
   bindButtonPressFeedback();
   restoreDonePanelState();
+  renderNotificationPermissionUI();
   registerServiceWorker();
+  bindServiceWorkerMessages();
   renderAll();
+  handleNotificationActionFromQuery();
+  startDueReminderWatcher();
 }
 
 function bindEvents() {
@@ -55,6 +74,16 @@ function bindEvents() {
   showDoneButton.addEventListener('click', showDonePanel);
   hideDoneButton.addEventListener('click', hideDonePanel);
   clearOldDoneButton.addEventListener('click', clearOldDoneReminders);
+  enableNotificationsButton.addEventListener('click', requestNotificationPermissionFromUser);
+  alertDoneButton.addEventListener('click', () => applyAlertAction('done'));
+  alertSnooze5Button.addEventListener('click', () => applyAlertAction('snooze5'));
+  alertSnooze15Button.addEventListener('click', () => applyAlertAction('snooze15'));
+  alertSnooze60Button.addEventListener('click', () => applyAlertAction('snooze60'));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      checkDueReminders();
+    }
+  });
 }
 
 function handleSubmit(event) {
@@ -89,7 +118,8 @@ function handleSubmit(event) {
   renderAll();
   resetFormState();
   showToast('Zapisano', 'success');
-  notifyAboutScheduledReminder(reminder);
+  remindAboutNotificationsIfNeeded();
+  checkDueReminders();
 }
 
 async function toggleRecording() {
@@ -258,7 +288,8 @@ function renderReminderList(root, items, emptyText) {
       doneButton.addEventListener('click', () => {
         updateReminder(reminder.id, {
           status: 'active',
-          completedAt: null
+          completedAt: null,
+          lastNotifiedDueAt: null
         });
         showToast('Przywrócono', 'success');
       });
@@ -266,17 +297,10 @@ function renderReminderList(root, items, emptyText) {
       snoozeButton.textContent = 'Zakończone';
     } else {
       doneButton.addEventListener('click', () => {
-        updateReminder(reminder.id, {
-          status: 'done',
-          completedAt: new Date().toISOString()
-        });
-        showToast('Oznaczono jako zrobione', 'success');
+        markReminderDone(reminder.id);
       });
       snoozeButton.addEventListener('click', () => {
-        const nextTime = new Date();
-        nextTime.setMinutes(nextTime.getMinutes() + 5);
-        updateReminder(reminder.id, { dueAt: nextTime.toISOString() });
-        showToast('Odłożono o 5 min', 'warning');
+        snoozeReminder(reminder.id, 5);
       });
     }
 
@@ -329,9 +353,21 @@ function classifyStatus(reminder) {
 }
 
 function updateReminder(id, changes) {
-  reminders = reminders.map((item) => item.id === id ? { ...item, ...changes } : item);
+  reminders = reminders.map((item) => {
+    if (item.id !== id) {
+      return item;
+    }
+
+    const merged = { ...item, ...changes };
+    if (Object.prototype.hasOwnProperty.call(changes, 'dueAt') && changes.dueAt !== item.dueAt) {
+      merged.lastNotifiedDueAt = null;
+    }
+    return merged;
+  });
+
   persistReminders();
   renderAll();
+  checkDueReminders();
 }
 
 function deleteReminder(id) {
@@ -594,16 +630,316 @@ function createId() {
   return `reminder-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function notifyAboutScheduledReminder(reminder) {
+function markReminderDone(reminderId, showFeedback = true) {
+  updateReminder(reminderId, {
+    status: 'done',
+    completedAt: new Date().toISOString()
+  });
+
+  if (showFeedback) {
+    showToast('Oznaczono jako zrobione', 'success');
+  }
+}
+
+function snoozeReminder(reminderId, minutes, showFeedback = true) {
+  const nextTime = new Date();
+  nextTime.setMinutes(nextTime.getMinutes() + minutes);
+  updateReminder(reminderId, { dueAt: nextTime.toISOString() });
+
+  if (showFeedback) {
+    showToast(`Odłożono o ${formatSnoozeLabel(minutes)}`, 'warning');
+  }
+}
+
+function formatSnoozeLabel(minutes) {
+  if (minutes === 60) {
+    return '1 godz.';
+  }
+  return `${minutes} min`;
+}
+
+function renderNotificationPermissionUI() {
+  if (!notificationsPanel || !notificationsText || !enableNotificationsButton) {
+    return;
+  }
+
+  if (!('Notification' in window)) {
+    notificationsPanel.hidden = false;
+    notificationsText.textContent = 'Ta przeglądarka nie wspiera powiadomień.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  notificationsPanel.hidden = false;
+
+  if (Notification.permission === 'granted') {
+    notificationsText.textContent = 'Powiadomienia są włączone.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  if (Notification.permission === 'denied') {
+    notificationsText.textContent = 'Powiadomienia są zablokowane. Włącz je w ustawieniach przeglądarki.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  notificationsText.textContent = 'Włącz powiadomienia, żeby przypomnienia były bardziej widoczne.';
+  enableNotificationsButton.hidden = false;
+}
+
+function remindAboutNotificationsIfNeeded() {
   if (!('Notification' in window)) {
     return;
   }
 
   if (Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
+    renderNotificationPermissionUI();
+  }
+}
+
+async function requestNotificationPermissionFromUser() {
+  if (!('Notification' in window)) {
+    showToast('Brak wsparcia dla powiadomień', 'warning');
+    return;
   }
 
-  console.info('Przygotowane pod przyszłe powiadomienia dla przypomnienia:', reminder.id);
+  try {
+    const permission = await Notification.requestPermission();
+    renderNotificationPermissionUI();
+
+    if (permission === 'granted') {
+      showToast('Powiadomienia włączone', 'success');
+      checkDueReminders();
+      return;
+    }
+
+    if (permission === 'denied') {
+      showToast('Powiadomienia zablokowane', 'warning');
+    }
+  } catch {
+    showToast('Nie udało się włączyć powiadomień', 'danger');
+  }
+}
+
+function startDueReminderWatcher() {
+  checkDueReminders();
+
+  if (dueCheckIntervalId) {
+    clearInterval(dueCheckIntervalId);
+  }
+
+  dueCheckIntervalId = window.setInterval(() => {
+    checkDueReminders();
+  }, DUE_CHECK_INTERVAL_MS);
+}
+
+function checkDueReminders() {
+  const now = Date.now();
+  const dueReminders = reminders.filter((item) => {
+    if (item.status !== 'active') {
+      return false;
+    }
+
+    const dueMs = new Date(item.dueAt).getTime();
+    if (Number.isNaN(dueMs) || dueMs > now) {
+      return false;
+    }
+
+    if (item.lastNotifiedDueAt === item.dueAt) {
+      return false;
+    }
+
+    return now - dueMs <= MAX_LATE_NOTIFICATION_MS;
+  });
+
+  if (dueReminders.length === 0) {
+    return;
+  }
+
+  dueReminders.forEach((reminder) => {
+    triggerReminder(reminder);
+  });
+}
+
+function triggerReminder(reminder) {
+  markReminderAsNotified(reminder.id, reminder.dueAt);
+  queueReminderAlert(reminder.id);
+  showBrowserNotification(reminder).catch(() => {});
+}
+
+function markReminderAsNotified(reminderId, dueAtValue) {
+  reminders = reminders.map((item) => {
+    if (item.id !== reminderId) {
+      return item;
+    }
+    return {
+      ...item,
+      lastNotifiedDueAt: dueAtValue
+    };
+  });
+
+  persistReminders();
+  renderAll();
+}
+
+function queueReminderAlert(reminderId) {
+  if (currentAlertReminderId === reminderId || alertQueue.includes(reminderId)) {
+    return;
+  }
+
+  alertQueue.push(reminderId);
+  showNextReminderAlert();
+}
+
+function showNextReminderAlert() {
+  if (currentAlertReminderId || alertQueue.length === 0) {
+    return;
+  }
+
+  const nextId = alertQueue.shift();
+  const reminder = reminders.find((item) => item.id === nextId && item.status === 'active');
+
+  if (!reminder) {
+    showNextReminderAlert();
+    return;
+  }
+
+  currentAlertReminderId = reminder.id;
+  reminderAlertTitle.textContent = `Przypomnienie: ${reminder.title}`;
+  reminderAlertNote.textContent = reminder.note || 'Bez dodatkowej notatki.';
+  reminderAlert.hidden = false;
+}
+
+function applyAlertAction(action) {
+  if (!currentAlertReminderId) {
+    return;
+  }
+
+  const reminderId = currentAlertReminderId;
+  currentAlertReminderId = null;
+  reminderAlert.hidden = true;
+
+  if (action === 'done') {
+    markReminderDone(reminderId);
+    showNextReminderAlert();
+    return;
+  }
+
+  if (action === 'snooze5') {
+    snoozeReminder(reminderId, 5);
+    showNextReminderAlert();
+    return;
+  }
+
+  if (action === 'snooze15') {
+    snoozeReminder(reminderId, 15);
+    showNextReminderAlert();
+    return;
+  }
+
+  if (action === 'snooze60') {
+    snoozeReminder(reminderId, 60);
+    showNextReminderAlert();
+  }
+}
+
+async function showBrowserNotification(reminder) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') {
+    return;
+  }
+
+  const options = {
+    body: reminder.note || `Termin: ${formatDateTime(reminder.dueAt)}`,
+    tag: `reminder-${reminder.id}`,
+    requireInteraction: true,
+    data: {
+      reminderId: reminder.id
+    },
+    actions: [
+      { action: 'done', title: 'Zrobione' },
+      { action: 'snooze5', title: 'Odłóż 5 min' },
+      { action: 'snooze15', title: 'Odłóż 15 min' },
+      { action: 'snooze60', title: 'Odłóż 1 godz.' }
+    ]
+  };
+
+  const swRegistration = await navigator.serviceWorker.getRegistration();
+  if (swRegistration && typeof swRegistration.showNotification === 'function') {
+    await swRegistration.showNotification(reminder.title, options);
+    return;
+  }
+
+  const fallback = new Notification(reminder.title, options);
+  fallback.addEventListener('click', () => {
+    window.focus();
+    queueReminderAlert(reminder.id);
+  });
+}
+
+function bindServiceWorkerMessages() {
+  if (!('serviceWorker' in navigator)) {
+    return;
+  }
+
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type !== 'notification-action') {
+      return;
+    }
+
+    processNotificationAction(data.action, data.reminderId);
+  });
+}
+
+function handleNotificationActionFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const action = params.get('notificationAction');
+  const reminderId = params.get('reminderId');
+
+  if (!action || !reminderId) {
+    return;
+  }
+
+  processNotificationAction(action, reminderId);
+  params.delete('notificationAction');
+  params.delete('reminderId');
+  const newQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${newQuery ? `?${newQuery}` : ''}${window.location.hash}`;
+  window.history.replaceState({}, '', nextUrl);
+}
+
+function processNotificationAction(action, reminderId) {
+  const reminder = reminders.find((item) => item.id === reminderId);
+  if (!reminder || reminder.status !== 'active') {
+    return;
+  }
+
+  if (action === 'done') {
+    markReminderDone(reminderId, false);
+    showToast('Zrobione z powiadomienia', 'success');
+    return;
+  }
+
+  if (action === 'snooze5') {
+    snoozeReminder(reminderId, 5, false);
+    showToast('Odłożono o 5 min', 'warning');
+    return;
+  }
+
+  if (action === 'snooze15') {
+    snoozeReminder(reminderId, 15, false);
+    showToast('Odłożono o 15 min', 'warning');
+    return;
+  }
+
+  if (action === 'snooze60') {
+    snoozeReminder(reminderId, 60, false);
+    showToast('Odłożono o 1 godz.', 'warning');
+    return;
+  }
+
+  queueReminderAlert(reminderId);
 }
 
 async function registerServiceWorker() {
