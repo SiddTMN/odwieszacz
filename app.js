@@ -1,10 +1,8 @@
-﻿const STORAGE_KEY = 'odwieszacz-reminders-v1';
-const CHECKLIST_KEY = 'odwieszacz-checklist-v1';
+const REMINDERS_KEY = 'odwieszacz-reminders-v1';
+const VOICE_NOTES_KEY = 'odwieszacz-voice-notes-v1';
 const SETTINGS_KEY = 'odwieszacz-settings-v1';
-const NOW_WINDOW_MINUTES = 15;
-const checklistItems = ['telefon', 'klucze', 'portfel', 'dokumenty', 'leki'];
 const DONE_RETENTION_DAYS = 7;
-const DUE_CHECK_INTERVAL_MS = 15000;
+const DUE_CHECK_INTERVAL_MS = 20000;
 const MAX_LATE_NOTIFICATION_MS = 6 * 60 * 60 * 1000;
 
 const form = document.getElementById('reminder-form');
@@ -14,74 +12,54 @@ const dateInput = document.getElementById('date');
 const timeInput = document.getElementById('time');
 const recordButton = document.getElementById('record-button');
 const recordingStatus = document.getElementById('recording-status');
-const audioPreview = document.getElementById('audio-preview');
-const template = document.getElementById('reminder-template');
-const resetChecklistButton = document.getElementById('reset-checklist');
-const showDoneButton = document.getElementById('show-done-button');
-const hideDoneButton = document.getElementById('hide-done-button');
-const clearOldDoneButton = document.getElementById('clear-old-done-button');
-const donePanel = document.getElementById('done-panel');
-const doneSummary = document.getElementById('done-summary');
-const actionToast = document.getElementById('action-toast');
+const latestNotePreview = document.getElementById('latest-note-preview');
+const feedbackBanner = document.getElementById('feedback-banner');
 const notificationsPanel = document.getElementById('notifications-panel');
 const notificationsText = document.getElementById('notifications-text');
 const enableNotificationsButton = document.getElementById('enable-notifications-button');
-const reminderAlert = document.getElementById('reminder-alert');
-const reminderAlertTitle = document.getElementById('reminder-alert-title');
-const reminderAlertNote = document.getElementById('reminder-alert-note');
-const alertDoneButton = document.getElementById('alert-done-button');
-const alertSnooze5Button = document.getElementById('alert-snooze-5-button');
-const alertSnooze15Button = document.getElementById('alert-snooze-15-button');
-const alertSnooze60Button = document.getElementById('alert-snooze-60-button');
-
-const listNow = document.getElementById('list-now');
-const listToday = document.getElementById('list-today');
-const listOverdue = document.getElementById('list-overdue');
-const listDone = document.getElementById('list-done');
-const checklistRoot = document.getElementById('checklist');
+const toggleDoneButton = document.getElementById('toggle-done-button');
+const clearOldDoneButton = document.getElementById('clear-old-done-button');
+const activeCount = document.getElementById('active-count');
+const voiceNoteCount = document.getElementById('voice-note-count');
+const activeRemindersRoot = document.getElementById('active-reminders');
+const donePanel = document.getElementById('done-panel');
+const doneSummary = document.getElementById('done-summary');
+const doneRemindersRoot = document.getElementById('done-reminders');
+const voiceNotesRoot = document.getElementById('voice-notes-list');
+const reminderTemplate = document.getElementById('reminder-template');
+const voiceNoteTemplate = document.getElementById('voice-note-template');
 
 let reminders = loadReminders();
-let checklistState = loadChecklistState();
+let voiceNotes = loadVoiceNotes();
 let settings = loadSettings();
 let mediaRecorder = null;
+let mediaStream = null;
 let recordedChunks = [];
-let currentAudioDataUrl = '';
-let toastTimeoutId = null;
+let feedbackTimeoutId = null;
 let dueCheckIntervalId = null;
-let alertQueue = [];
-let currentAlertReminderId = null;
 
 initializeApp();
 
 function initializeApp() {
-  ensureSampleData();
   applyDefaultDateTime();
   bindEvents();
   bindButtonPressFeedback();
-  restoreDonePanelState();
   renderNotificationPermissionUI();
   registerServiceWorker();
-  bindServiceWorkerMessages();
   renderAll();
-  handleNotificationActionFromQuery();
   startDueReminderWatcher();
 }
 
 function bindEvents() {
   form.addEventListener('submit', handleSubmit);
   recordButton.addEventListener('click', toggleRecording);
-  resetChecklistButton.addEventListener('click', resetChecklist);
-  showDoneButton.addEventListener('click', showDonePanel);
-  hideDoneButton.addEventListener('click', hideDonePanel);
-  clearOldDoneButton.addEventListener('click', clearOldDoneReminders);
   enableNotificationsButton.addEventListener('click', requestNotificationPermissionFromUser);
-  alertDoneButton.addEventListener('click', () => applyAlertAction('done'));
-  alertSnooze5Button.addEventListener('click', () => applyAlertAction('snooze5'));
-  alertSnooze15Button.addEventListener('click', () => applyAlertAction('snooze15'));
-  alertSnooze60Button.addEventListener('click', () => applyAlertAction('snooze60'));
+  toggleDoneButton.addEventListener('click', toggleDonePanel);
+  clearOldDoneButton.addEventListener('click', clearOldDoneReminders);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       checkDueReminders();
+      renderReminderLists();
     }
   });
 }
@@ -89,20 +67,21 @@ function bindEvents() {
 function handleSubmit(event) {
   event.preventDefault();
 
-  const dueAt = buildDueAt(dateInput.value, timeInput.value);
   const title = titleInput.value.trim();
+  const dueAt = buildDueAt(dateInput.value, timeInput.value);
 
   if (!title) {
-    alert('Wpisz tytuł przypomnienia.');
+    showFeedback('Wpisz, co trzeba zrobic.', 'warning', true);
+    titleInput.focus();
     return;
   }
 
   if (!dueAt) {
-    alert('Wybierz poprawną datę i godzinę.');
+    showFeedback('Wybierz poprawna date i godzine.', 'warning', true);
     return;
   }
 
-  const reminder = {
+  reminders.unshift({
     id: createId(),
     title,
     note: noteInput.value.trim(),
@@ -110,14 +89,13 @@ function handleSubmit(event) {
     createdAt: new Date().toISOString(),
     completedAt: null,
     status: 'active',
-    audioDataUrl: currentAudioDataUrl || ''
-  };
+    lastNotifiedDueAt: null
+  });
 
-  reminders.unshift(reminder);
   persistReminders();
+  resetReminderForm();
   renderAll();
-  resetFormState();
-  showToast('Zapisano', 'success');
+  showFeedback('Przypomnienie zapisane.', 'success');
   remindAboutNotificationsIfNeeded();
   checkDueReminders();
 }
@@ -129,14 +107,14 @@ async function toggleRecording() {
   }
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-    alert('Ta przeglądarka nie obsługuje nagrywania mikrofonu.');
+    showFeedback('Ta przegladarka nie obsluguje nagrywania.', 'danger', true);
     return;
   }
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recordedChunks = [];
-    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder = new MediaRecorder(mediaStream);
 
     mediaRecorder.addEventListener('dataavailable', (event) => {
       if (event.data.size > 0) {
@@ -144,225 +122,241 @@ async function toggleRecording() {
       }
     });
 
-    mediaRecorder.addEventListener('stop', async () => {
-      const blob = new Blob(recordedChunks, { type: 'audio/webm' });
-      currentAudioDataUrl = await blobToDataUrl(blob);
-      audioPreview.src = currentAudioDataUrl;
-      audioPreview.hidden = false;
-      setRecordingIdle('Nagranie gotowe');
-      showToast('Nagranie gotowe', 'success');
-      stream.getTracks().forEach((track) => track.stop());
-    }, { once: true });
-
+    mediaRecorder.addEventListener('stop', handleRecordingStop, { once: true });
     mediaRecorder.start();
     recordButton.classList.add('recording');
-    recordButton.textContent = 'Zakończ nagrywanie';
+    recordButton.textContent = 'Zatrzymaj i zapisz';
     recordingStatus.textContent = 'Nagrywanie trwa';
+    showFeedback('Nagrywanie wlaczone.', 'neutral');
   } catch (error) {
     console.error(error);
-    alert('Nie udało się uruchomić mikrofonu. Sprawdź uprawnienia przeglądarki.');
+    stopMediaStream();
+    showFeedback('Nie udalo sie uruchomic mikrofonu.', 'danger', true);
   }
 }
 
-function resetChecklist() {
-  checklistState = Object.fromEntries(checklistItems.map((item) => [item, false]));
-  persistChecklistState();
-  renderChecklist();
-  showToast('Checklista wyczyszczona');
+async function handleRecordingStop() {
+  recordButton.classList.remove('recording');
+  recordButton.textContent = 'Nagraj notatke';
+
+  try {
+    if (recordedChunks.length === 0) {
+      recordingStatus.textContent = 'Brak nagrania';
+      showFeedback('Nagranie jest puste.', 'warning');
+      return;
+    }
+
+    const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+    const dataUrl = await blobToDataUrl(blob);
+    const note = {
+      id: createId(),
+      createdAt: new Date().toISOString(),
+      audioDataUrl: dataUrl
+    };
+
+    voiceNotes.unshift(note);
+    persistVoiceNotes();
+    latestNotePreview.src = dataUrl;
+    latestNotePreview.hidden = false;
+    recordingStatus.textContent = 'Notatka zapisana';
+    renderVoiceNotes();
+    showFeedback('Notatka glosowa zapisana.', 'success');
+  } catch (error) {
+    console.error(error);
+    recordingStatus.textContent = 'Blad zapisu';
+    showFeedback('Nie udalo sie zapisac nagrania.', 'danger', true);
+  } finally {
+    recordedChunks = [];
+    mediaRecorder = null;
+    stopMediaStream();
+  }
 }
 
-function showDonePanel() {
-  settings.showDonePanel = true;
-  persistSettings();
-  restoreDonePanelState();
-  renderDoneList();
-  showToast('Otwarto Zrobione');
-}
+function stopMediaStream() {
+  if (!mediaStream) {
+    return;
+  }
 
-function hideDonePanel() {
-  settings.showDonePanel = false;
-  persistSettings();
-  restoreDonePanelState();
-  showToast('Ukryto Zrobione');
-}
-
-function restoreDonePanelState() {
-  donePanel.hidden = !settings.showDonePanel;
-  showDoneButton.textContent = settings.showDonePanel ? 'Zrobione otwarte' : 'Pokaż zrobione';
-  showDoneButton.disabled = settings.showDonePanel;
+  mediaStream.getTracks().forEach((track) => track.stop());
+  mediaStream = null;
 }
 
 function renderAll() {
-  renderReminderGroups();
-  renderDoneList();
-  renderChecklist();
+  renderReminderLists();
+  renderVoiceNotes();
+  renderDonePanelState();
 }
 
-function renderReminderGroups() {
+function renderReminderLists() {
   const activeReminders = reminders
     .filter((item) => item.status === 'active')
     .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
-
-  const now = new Date();
-  const todayKey = getDateKey(now);
-  const groups = {
-    now: [],
-    today: [],
-    overdue: []
-  };
-
-  for (const reminder of activeReminders) {
-    const dueDate = new Date(reminder.dueAt);
-    const diffMinutes = (dueDate - now) / 60000;
-    const reminderDateKey = getDateKey(dueDate);
-
-    if (diffMinutes < 0) {
-      groups.overdue.push(reminder);
-    } else if (diffMinutes <= NOW_WINDOW_MINUTES) {
-      groups.now.push(reminder);
-    } else if (reminderDateKey === todayKey) {
-      groups.today.push(reminder);
-    }
-  }
-
-  renderReminderList(listNow, groups.now, 'Brak pilnych przypomnień.');
-  renderReminderList(listToday, groups.today, 'Na dziś nic więcej nie ma.');
-  renderReminderList(listOverdue, groups.overdue, 'Brak spóźnionych przypomnień.');
-}
-
-function renderDoneList() {
   const doneReminders = reminders
     .filter((item) => item.status === 'done')
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 
+  activeCount.textContent = String(activeReminders.length);
+  renderReminderList(activeRemindersRoot, activeReminders, false, 'Brak aktywnych przypomnien.');
+  renderReminderList(doneRemindersRoot, doneReminders, true, 'Brak zakonczonych przypomnien.');
   updateDoneSummary(doneReminders);
-  renderReminderList(listDone, doneReminders, 'Brak zakończonych przypomnień.');
 }
 
-function renderReminderList(root, items, emptyText) {
+function renderReminderList(root, items, isDoneList, emptyText) {
   root.innerHTML = '';
 
   if (items.length === 0) {
     const empty = document.createElement('p');
-    empty.className = 'empty';
+    empty.className = 'empty-state';
     empty.textContent = emptyText;
     root.appendChild(empty);
     return;
   }
 
   for (const reminder of items) {
-    const node = template.content.firstElementChild.cloneNode(true);
+    const node = reminderTemplate.content.firstElementChild.cloneNode(true);
     const titleNode = node.querySelector('.reminder-title');
-    const noteNode = node.querySelector('.note-row');
-    const statusNode = node.querySelector('.status-text');
-    const scheduleNode = node.querySelector('.schedule-row');
-    const audioPlayer = node.querySelector('.audio-player');
-    const playButton = node.querySelector('.play-button');
+    const timeNode = node.querySelector('.reminder-time');
+    const noteNode = node.querySelector('.reminder-note');
     const doneButton = node.querySelector('.done-button');
     const snoozeButton = node.querySelector('.snooze-button');
     const deleteButton = node.querySelector('.delete-button');
-    const statusInfo = classifyStatus(reminder);
 
     titleNode.textContent = reminder.title;
-    noteNode.innerHTML = reminder.note ? `<strong>Notatka:</strong> ${escapeHtml(reminder.note)}` : '<strong>Notatka:</strong> brak';
-    statusNode.textContent = statusInfo.label;
-    scheduleNode.innerHTML = buildScheduleText(reminder);
+    timeNode.textContent = formatReminderTime(reminder, isDoneList);
+    applyReminderTone(node, reminder);
 
-    if (statusInfo.className) {
-      node.classList.add(statusInfo.className);
+    if (reminder.note) {
+      noteNode.hidden = false;
+      noteNode.textContent = reminder.note;
     }
 
-    if (reminder.audioDataUrl) {
-      audioPlayer.src = reminder.audioDataUrl;
-      playButton.addEventListener('click', () => {
-        audioPlayer.hidden = false;
-        audioPlayer.play().catch(() => {});
-      });
+    if (isDoneList) {
+      doneButton.textContent = 'Przywroc';
+      doneButton.addEventListener('click', () => restoreReminder(reminder.id));
+      snoozeButton.hidden = true;
     } else {
-      playButton.disabled = true;
-      playButton.textContent = 'Brak nagrania';
+      doneButton.addEventListener('click', () => markReminderDone(reminder.id));
+      snoozeButton.addEventListener('click', () => snoozeReminder(reminder.id, 10));
     }
 
-    if (reminder.status === 'done') {
-      doneButton.textContent = 'Przywróć';
-      doneButton.addEventListener('click', () => {
-        updateReminder(reminder.id, {
-          status: 'active',
-          completedAt: null,
-          lastNotifiedDueAt: null
-        });
-        showToast('Przywrócono', 'success');
-      });
-      snoozeButton.disabled = true;
-      snoozeButton.textContent = 'Zakończone';
-    } else {
-      doneButton.addEventListener('click', () => {
-        markReminderDone(reminder.id);
-      });
-      snoozeButton.addEventListener('click', () => {
-        snoozeReminder(reminder.id, 5);
-      });
-    }
-
-    deleteButton.addEventListener('click', () => {
-      deleteReminder(reminder.id);
-      showToast('Usunięto', 'danger');
-    });
-
+    deleteButton.addEventListener('click', () => deleteReminder(reminder.id));
     root.appendChild(node);
   }
 }
 
-function renderChecklist() {
-  checklistRoot.innerHTML = '';
+function renderVoiceNotes() {
+  voiceNotesRoot.innerHTML = '';
+  voiceNoteCount.textContent = String(voiceNotes.length);
 
-  checklistItems.forEach((item) => {
-    const label = document.createElement('label');
-    label.className = 'check-item';
+  if (voiceNotes.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-state';
+    empty.textContent = 'Brak szybkich notatek glosowych.';
+    voiceNotesRoot.appendChild(empty);
+    return;
+  }
 
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = Boolean(checklistState[item]);
-    input.addEventListener('change', () => {
-      checklistState[item] = input.checked;
-      persistChecklistState();
-    });
+  for (const note of voiceNotes) {
+    const node = voiceNoteTemplate.content.firstElementChild.cloneNode(true);
+    const titleNode = node.querySelector('.voice-note-title');
+    const timeNode = node.querySelector('.voice-note-time');
+    const audioNode = node.querySelector('.voice-note-audio');
+    const deleteButton = node.querySelector('.note-delete-button');
 
-    const text = document.createElement('span');
-    text.textContent = item;
+    titleNode.textContent = `Notatka ${formatDateTime(note.createdAt)}`;
+    timeNode.textContent = 'Zapisano lokalnie w tej przegladarce.';
+    audioNode.src = note.audioDataUrl;
+    deleteButton.addEventListener('click', () => deleteVoiceNote(note.id));
 
-    label.append(input, text);
-    checklistRoot.appendChild(label);
+    voiceNotesRoot.appendChild(node);
+  }
+}
+
+function renderDonePanelState() {
+  donePanel.hidden = !settings.showDonePanel;
+  toggleDoneButton.textContent = settings.showDonePanel ? 'Ukryj zrobione' : 'Pokaz zrobione';
+}
+
+function updateDoneSummary(doneReminders) {
+  const oldCount = doneReminders.filter((item) => isOldDoneReminder(item)).length;
+
+  if (doneReminders.length === 0) {
+    doneSummary.textContent = 'Tutaj trafiaja zakonczone przypomnienia.';
+  } else {
+    doneSummary.textContent = `Zakonczone: ${doneReminders.length}. Stare wpisy starsze niz ${DONE_RETENTION_DAYS} dni: ${oldCount}.`;
+  }
+
+  clearOldDoneButton.disabled = oldCount === 0;
+}
+
+function toggleDonePanel() {
+  settings.showDonePanel = !settings.showDonePanel;
+  persistSettings();
+  renderDonePanelState();
+}
+
+function markReminderDone(reminderId) {
+  updateReminder(reminderId, {
+    status: 'done',
+    completedAt: new Date().toISOString()
   });
+  showFeedback('Przypomnienie oznaczone jako zrobione.', 'success');
 }
 
-function classifyStatus(reminder) {
-  const dueDate = new Date(reminder.dueAt);
-  const diffMinutes = (dueDate - new Date()) / 60000;
-
-  if (reminder.status === 'done') {
-    return { label: 'zrobione', className: 'done' };
-  }
-  if (diffMinutes < 0) {
-    return { label: 'spóźnione', className: 'overdue' };
-  }
-  if (diffMinutes <= NOW_WINDOW_MINUTES) {
-    return { label: 'na teraz', className: 'now' };
-  }
-  return { label: 'aktywne', className: '' };
+function restoreReminder(reminderId) {
+  updateReminder(reminderId, {
+    status: 'active',
+    completedAt: null,
+    lastNotifiedDueAt: null
+  });
+  showFeedback('Przypomnienie przywrocone.', 'neutral');
 }
 
-function updateReminder(id, changes) {
+function snoozeReminder(reminderId, minutes) {
+  const nextTime = new Date();
+  nextTime.setMinutes(nextTime.getMinutes() + minutes);
+  updateReminder(reminderId, {
+    dueAt: nextTime.toISOString(),
+    lastNotifiedDueAt: null
+  });
+  showFeedback(`Przypomnienie odlozone o ${minutes} min.`, 'warning');
+}
+
+function deleteReminder(reminderId) {
+  reminders = reminders.filter((item) => item.id !== reminderId);
+  persistReminders();
+  renderAll();
+  showFeedback('Przypomnienie usuniete.', 'neutral');
+}
+
+function deleteVoiceNote(noteId) {
+  voiceNotes = voiceNotes.filter((item) => item.id !== noteId);
+  persistVoiceNotes();
+  renderVoiceNotes();
+  showFeedback('Notatka glosowa usunieta.', 'neutral');
+}
+
+function clearOldDoneReminders() {
+  const originalLength = reminders.length;
+  reminders = reminders.filter((item) => item.status !== 'done' || !isOldDoneReminder(item));
+
+  if (reminders.length === originalLength) {
+    showFeedback('Nie ma starych wpisow do wyczyszczenia.', 'warning');
+    return;
+  }
+
+  persistReminders();
+  renderAll();
+  showFeedback('Usunieto stare zakonczone wpisy.', 'neutral');
+}
+
+function updateReminder(reminderId, changes) {
   reminders = reminders.map((item) => {
-    if (item.id !== id) {
+    if (item.id !== reminderId) {
       return item;
     }
 
-    const merged = { ...item, ...changes };
-    if (Object.prototype.hasOwnProperty.call(changes, 'dueAt') && changes.dueAt !== item.dueAt) {
-      merged.lastNotifiedDueAt = null;
-    }
-    return merged;
+    return { ...item, ...changes };
   });
 
   persistReminders();
@@ -370,61 +364,228 @@ function updateReminder(id, changes) {
   checkDueReminders();
 }
 
-function deleteReminder(id) {
-  reminders = reminders.filter((item) => item.id !== id);
-  persistReminders();
-  renderAll();
+function startDueReminderWatcher() {
+  checkDueReminders();
+
+  if (dueCheckIntervalId) {
+    clearInterval(dueCheckIntervalId);
+  }
+
+  dueCheckIntervalId = window.setInterval(() => {
+    checkDueReminders();
+  }, DUE_CHECK_INTERVAL_MS);
 }
 
-function clearOldDoneReminders() {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - DONE_RETENTION_DAYS);
-
-  const originalLength = reminders.length;
-  reminders = reminders.filter((item) => {
-    if (item.status !== 'done') {
-      return true;
+function checkDueReminders() {
+  const now = Date.now();
+  const dueReminders = reminders.filter((item) => {
+    if (item.status !== 'active') {
+      return false;
     }
 
-    const completedAt = item.completedAt ? new Date(item.completedAt) : new Date(item.createdAt);
-    return completedAt >= cutoff;
+    const dueTime = new Date(item.dueAt).getTime();
+    if (Number.isNaN(dueTime) || dueTime > now) {
+      return false;
+    }
+
+    if (item.lastNotifiedDueAt === item.dueAt) {
+      return false;
+    }
+
+    return now - dueTime <= MAX_LATE_NOTIFICATION_MS;
   });
 
-  if (reminders.length === originalLength) {
-    showToast('Nie ma starych zakończonych', 'warning');
+  for (const reminder of dueReminders) {
+    markReminderAsNotified(reminder.id, reminder.dueAt);
+    showBrowserNotification(reminder).catch(() => {});
+    showFeedback(`Teraz: ${reminder.title}.`, 'warning');
+  }
+
+  if (dueReminders.length > 0) {
+    renderReminderLists();
+  }
+}
+
+function markReminderAsNotified(reminderId, dueAtValue) {
+  reminders = reminders.map((item) => {
+    if (item.id !== reminderId) {
+      return item;
+    }
+
+    return {
+      ...item,
+      lastNotifiedDueAt: dueAtValue
+    };
+  });
+
+  persistReminders();
+}
+
+async function showBrowserNotification(reminder) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') {
     return;
   }
 
-  persistReminders();
-  renderAll();
-  showToast('Usunięto stare zakończone', 'danger');
+  const options = {
+    body: `${reminder.note ? `${reminder.note}. ` : ''}Otworz aplikacje, aby oznaczyc lub odlozyc.`,
+    tag: `reminder-${reminder.id}`,
+    requireInteraction: true,
+    data: {
+      reminderId: reminder.id
+    }
+  };
+
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (registration && typeof registration.showNotification === 'function') {
+    await registration.showNotification(reminder.title, options);
+    return;
+  }
+
+  const fallbackNotification = new Notification(reminder.title, options);
+  fallbackNotification.addEventListener('click', () => {
+    window.focus();
+  });
+}
+
+function renderNotificationPermissionUI() {
+  if (!('Notification' in window)) {
+    notificationsPanel.hidden = false;
+    notificationsText.textContent = 'Ta przegladarka nie wspiera powiadomien.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  notificationsPanel.hidden = false;
+
+  if (Notification.permission === 'granted') {
+    notificationsText.textContent = 'Powiadomienia sa wlaczone. Sluza tylko do informacji.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  if (Notification.permission === 'denied') {
+    notificationsText.textContent = 'Powiadomienia sa zablokowane w przegladarce.';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  notificationsText.textContent = 'Mozesz wlaczyc powiadomienia, ale glowne akcje wykonuje sie w aplikacji.';
+  enableNotificationsButton.hidden = false;
+}
+
+function remindAboutNotificationsIfNeeded() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    renderNotificationPermissionUI();
+  }
+}
+
+async function requestNotificationPermissionFromUser() {
+  if (!('Notification' in window)) {
+    showFeedback('Ta przegladarka nie obsluguje powiadomien.', 'warning');
+    return;
+  }
+
+  try {
+    const permission = await Notification.requestPermission();
+    renderNotificationPermissionUI();
+
+    if (permission === 'granted') {
+      showFeedback('Powiadomienia wlaczone.', 'success');
+      checkDueReminders();
+      return;
+    }
+
+    if (permission === 'denied') {
+      showFeedback('Powiadomienia zablokowane.', 'warning');
+    }
+  } catch {
+    showFeedback('Nie udalo sie wlaczyc powiadomien.', 'danger', true);
+  }
+}
+
+function showFeedback(message, tone = 'neutral', keepVisible = false) {
+  feedbackBanner.textContent = message;
+  feedbackBanner.className = `feedback-banner ${tone}`;
+  feedbackBanner.hidden = false;
+
+  if (feedbackTimeoutId) {
+    clearTimeout(feedbackTimeoutId);
+  }
+
+  if (keepVisible) {
+    return;
+  }
+
+  feedbackTimeoutId = window.setTimeout(() => {
+    feedbackBanner.hidden = true;
+  }, 2400);
+}
+
+function applyReminderTone(node, reminder) {
+  node.classList.remove('is-overdue', 'is-due-soon', 'is-done');
+
+  if (reminder.status === 'done') {
+    node.classList.add('is-done');
+    return;
+  }
+
+  const diffMinutes = (new Date(reminder.dueAt) - new Date()) / 60000;
+
+  if (diffMinutes < 0) {
+    node.classList.add('is-overdue');
+    return;
+  }
+
+  if (diffMinutes <= 60) {
+    node.classList.add('is-due-soon');
+  }
+}
+
+function formatReminderTime(reminder, isDoneList) {
+  if (isDoneList && reminder.completedAt) {
+    return `Zrobione: ${formatDateTime(reminder.completedAt)} | Termin: ${formatDateTime(reminder.dueAt)}`;
+  }
+
+  const dueDate = new Date(reminder.dueAt);
+  const diffMinutes = Math.round((dueDate - new Date()) / 60000);
+
+  if (diffMinutes < 0) {
+    return `Po terminie od ${Math.abs(diffMinutes)} min | ${formatDateTime(reminder.dueAt)}`;
+  }
+
+  if (diffMinutes <= 60) {
+    return `Dzisiaj, za ${diffMinutes} min | ${formatDateTime(reminder.dueAt)}`;
+  }
+
+  return formatDateTime(reminder.dueAt);
 }
 
 function loadReminders() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const raw = localStorage.getItem(REMINDERS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
 function persistReminders() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(reminders));
+  localStorage.setItem(REMINDERS_KEY, JSON.stringify(reminders));
 }
 
-function loadChecklistState() {
+function loadVoiceNotes() {
   try {
-    const raw = localStorage.getItem(CHECKLIST_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return Object.fromEntries(checklistItems.map((item) => [item, Boolean(parsed[item])])) ;
+    const raw = localStorage.getItem(VOICE_NOTES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return Object.fromEntries(checklistItems.map((item) => [item, false]));
+    return [];
   }
 }
 
-function persistChecklistState() {
-  localStorage.setItem(CHECKLIST_KEY, JSON.stringify(checklistState));
+function persistVoiceNotes() {
+  localStorage.setItem(VOICE_NOTES_KEY, JSON.stringify(voiceNotes));
 }
 
 function loadSettings() {
@@ -445,50 +606,17 @@ function persistSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
-function ensureSampleData() {
-  if (reminders.length > 0) {
-    return;
-  }
+function isOldDoneReminder(reminder) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - DONE_RETENTION_DAYS);
+  const completedAt = reminder.completedAt ? new Date(reminder.completedAt) : new Date(reminder.createdAt);
+  return completedAt < cutoff;
+}
 
-  const now = new Date();
-  const in10Min = new Date(now.getTime() + 10 * 60000);
-  const in2Hours = new Date(now.getTime() + 120 * 60000);
-  const overdue = new Date(now.getTime() - 25 * 60000);
-
-  reminders = [
-    {
-      id: createId(),
-      title: 'Wypij wodę',
-      note: 'Szklanka stoi w kuchni.',
-      dueAt: in10Min.toISOString(),
-      createdAt: now.toISOString(),
-      completedAt: null,
-      status: 'active',
-      audioDataUrl: ''
-    },
-    {
-      id: createId(),
-      title: 'Telefon do córki',
-      note: 'Zapytaj o wizytę w sobotę.',
-      dueAt: in2Hours.toISOString(),
-      createdAt: now.toISOString(),
-      completedAt: null,
-      status: 'active',
-      audioDataUrl: ''
-    },
-    {
-      id: createId(),
-      title: 'Weź leki',
-      note: 'Tabletki są przy czajniku.',
-      dueAt: overdue.toISOString(),
-      createdAt: now.toISOString(),
-      completedAt: null,
-      status: 'active',
-      audioDataUrl: ''
-    }
-  ];
-
-  persistReminders();
+function resetReminderForm() {
+  form.reset();
+  applyDefaultDateTime();
+  titleInput.focus();
 }
 
 function applyDefaultDateTime() {
@@ -496,16 +624,6 @@ function applyDefaultDateTime() {
   next.setMinutes(next.getMinutes() + 30);
   dateInput.value = getDateKey(next);
   timeInput.value = `${String(next.getHours()).padStart(2, '0')}:${String(next.getMinutes()).padStart(2, '0')}`;
-}
-
-function resetFormState() {
-  form.reset();
-  currentAudioDataUrl = '';
-  audioPreview.hidden = true;
-  audioPreview.removeAttribute('src');
-  applyDefaultDateTime();
-  setRecordingIdle('Przypomnienie zapisane');
-  titleInput.focus();
 }
 
 function buildDueAt(dateValue, timeValue) {
@@ -528,12 +646,6 @@ function getDateKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-function setRecordingIdle(message) {
-  recordButton.classList.remove('recording');
-  recordButton.textContent = 'Nagraj przypomnienie';
-  recordingStatus.textContent = message;
-}
-
 function bindButtonPressFeedback() {
   const clearPressed = (button) => {
     if (button) {
@@ -546,6 +658,7 @@ function bindButtonPressFeedback() {
     if (!button || button.disabled) {
       return;
     }
+
     button.classList.add('is-pressed');
   });
 
@@ -562,52 +675,6 @@ function bindButtonPressFeedback() {
   }, true);
 }
 
-function updateDoneSummary(doneReminders) {
-  const count = doneReminders.length;
-  const oldCount = doneReminders.filter((item) => isOldDoneReminder(item)).length;
-
-  doneSummary.textContent = count === 0
-    ? 'Brak zakończonych przypomnień.'
-    : `Zakończone: ${count}. Starsze niż ${DONE_RETENTION_DAYS} dni: ${oldCount}.`;
-
-  clearOldDoneButton.disabled = oldCount === 0;
-}
-
-function isOldDoneReminder(reminder) {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - DONE_RETENTION_DAYS);
-  const completedAt = reminder.completedAt ? new Date(reminder.completedAt) : new Date(reminder.createdAt);
-  return completedAt < cutoff;
-}
-
-function buildScheduleText(reminder) {
-  const dueText = `<strong>Termin:</strong> ${formatDateTime(reminder.dueAt)}`;
-
-  if (reminder.status !== 'done' || !reminder.completedAt) {
-    return dueText;
-  }
-
-  return `${dueText}<br><strong>Zakończone:</strong> ${formatDateTime(reminder.completedAt)}`;
-}
-
-function showToast(message, variant = 'neutral') {
-  if (!actionToast) {
-    return;
-  }
-
-  actionToast.textContent = message;
-  actionToast.className = `action-toast ${variant}`;
-  actionToast.hidden = false;
-
-  if (toastTimeoutId) {
-    clearTimeout(toastTimeoutId);
-  }
-
-  toastTimeoutId = window.setTimeout(() => {
-    actionToast.hidden = true;
-  }, 1800);
-}
-
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -617,329 +684,12 @@ function blobToDataUrl(blob) {
   });
 }
 
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
-
 function createId() {
   if (window.crypto && typeof window.crypto.randomUUID === 'function') {
     return window.crypto.randomUUID();
   }
-  return `reminder-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
-function markReminderDone(reminderId, showFeedback = true) {
-  updateReminder(reminderId, {
-    status: 'done',
-    completedAt: new Date().toISOString()
-  });
-
-  if (showFeedback) {
-    showToast('Oznaczono jako zrobione', 'success');
-  }
-}
-
-function snoozeReminder(reminderId, minutes, showFeedback = true) {
-  const nextTime = new Date();
-  nextTime.setMinutes(nextTime.getMinutes() + minutes);
-  updateReminder(reminderId, { dueAt: nextTime.toISOString() });
-
-  if (showFeedback) {
-    showToast(`Odłożono o ${formatSnoozeLabel(minutes)}`, 'warning');
-  }
-}
-
-function formatSnoozeLabel(minutes) {
-  if (minutes === 60) {
-    return '1 godz.';
-  }
-  return `${minutes} min`;
-}
-
-function renderNotificationPermissionUI() {
-  if (!notificationsPanel || !notificationsText || !enableNotificationsButton) {
-    return;
-  }
-
-  if (!('Notification' in window)) {
-    notificationsPanel.hidden = false;
-    notificationsText.textContent = 'Ta przeglądarka nie wspiera powiadomień.';
-    enableNotificationsButton.hidden = true;
-    return;
-  }
-
-  notificationsPanel.hidden = false;
-
-  if (Notification.permission === 'granted') {
-    notificationsText.textContent = 'Powiadomienia są włączone.';
-    enableNotificationsButton.hidden = true;
-    return;
-  }
-
-  if (Notification.permission === 'denied') {
-    notificationsText.textContent = 'Powiadomienia są zablokowane. Włącz je w ustawieniach przeglądarki.';
-    enableNotificationsButton.hidden = true;
-    return;
-  }
-
-  notificationsText.textContent = 'Włącz powiadomienia, żeby przypomnienia były bardziej widoczne.';
-  enableNotificationsButton.hidden = false;
-}
-
-function remindAboutNotificationsIfNeeded() {
-  if (!('Notification' in window)) {
-    return;
-  }
-
-  if (Notification.permission === 'default') {
-    renderNotificationPermissionUI();
-  }
-}
-
-async function requestNotificationPermissionFromUser() {
-  if (!('Notification' in window)) {
-    showToast('Brak wsparcia dla powiadomień', 'warning');
-    return;
-  }
-
-  try {
-    const permission = await Notification.requestPermission();
-    renderNotificationPermissionUI();
-
-    if (permission === 'granted') {
-      showToast('Powiadomienia włączone', 'success');
-      checkDueReminders();
-      return;
-    }
-
-    if (permission === 'denied') {
-      showToast('Powiadomienia zablokowane', 'warning');
-    }
-  } catch {
-    showToast('Nie udało się włączyć powiadomień', 'danger');
-  }
-}
-
-function startDueReminderWatcher() {
-  checkDueReminders();
-
-  if (dueCheckIntervalId) {
-    clearInterval(dueCheckIntervalId);
-  }
-
-  dueCheckIntervalId = window.setInterval(() => {
-    checkDueReminders();
-  }, DUE_CHECK_INTERVAL_MS);
-}
-
-function checkDueReminders() {
-  const now = Date.now();
-  const dueReminders = reminders.filter((item) => {
-    if (item.status !== 'active') {
-      return false;
-    }
-
-    const dueMs = new Date(item.dueAt).getTime();
-    if (Number.isNaN(dueMs) || dueMs > now) {
-      return false;
-    }
-
-    if (item.lastNotifiedDueAt === item.dueAt) {
-      return false;
-    }
-
-    return now - dueMs <= MAX_LATE_NOTIFICATION_MS;
-  });
-
-  if (dueReminders.length === 0) {
-    return;
-  }
-
-  dueReminders.forEach((reminder) => {
-    triggerReminder(reminder);
-  });
-}
-
-function triggerReminder(reminder) {
-  markReminderAsNotified(reminder.id, reminder.dueAt);
-  queueReminderAlert(reminder.id);
-  showBrowserNotification(reminder).catch(() => {});
-}
-
-function markReminderAsNotified(reminderId, dueAtValue) {
-  reminders = reminders.map((item) => {
-    if (item.id !== reminderId) {
-      return item;
-    }
-    return {
-      ...item,
-      lastNotifiedDueAt: dueAtValue
-    };
-  });
-
-  persistReminders();
-  renderAll();
-}
-
-function queueReminderAlert(reminderId) {
-  if (currentAlertReminderId === reminderId || alertQueue.includes(reminderId)) {
-    return;
-  }
-
-  alertQueue.push(reminderId);
-  showNextReminderAlert();
-}
-
-function showNextReminderAlert() {
-  if (currentAlertReminderId || alertQueue.length === 0) {
-    return;
-  }
-
-  const nextId = alertQueue.shift();
-  const reminder = reminders.find((item) => item.id === nextId && item.status === 'active');
-
-  if (!reminder) {
-    showNextReminderAlert();
-    return;
-  }
-
-  currentAlertReminderId = reminder.id;
-  reminderAlertTitle.textContent = `Przypomnienie: ${reminder.title}`;
-  reminderAlertNote.textContent = reminder.note || 'Bez dodatkowej notatki.';
-  reminderAlert.hidden = false;
-}
-
-function applyAlertAction(action) {
-  if (!currentAlertReminderId) {
-    return;
-  }
-
-  const reminderId = currentAlertReminderId;
-  currentAlertReminderId = null;
-  reminderAlert.hidden = true;
-
-  if (action === 'done') {
-    markReminderDone(reminderId);
-    showNextReminderAlert();
-    return;
-  }
-
-  if (action === 'snooze5') {
-    snoozeReminder(reminderId, 5);
-    showNextReminderAlert();
-    return;
-  }
-
-  if (action === 'snooze15') {
-    snoozeReminder(reminderId, 15);
-    showNextReminderAlert();
-    return;
-  }
-
-  if (action === 'snooze60') {
-    snoozeReminder(reminderId, 60);
-    showNextReminderAlert();
-  }
-}
-
-async function showBrowserNotification(reminder) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') {
-    return;
-  }
-
-  const options = {
-    body: reminder.note || `Termin: ${formatDateTime(reminder.dueAt)}`,
-    tag: `reminder-${reminder.id}`,
-    requireInteraction: true,
-    data: {
-      reminderId: reminder.id
-    },
-    actions: [
-      { action: 'done', title: 'Zrobione' },
-      { action: 'snooze5', title: 'Odłóż 5 min' },
-      { action: 'snooze15', title: 'Odłóż 15 min' },
-      { action: 'snooze60', title: 'Odłóż 1 godz.' }
-    ]
-  };
-
-  const swRegistration = await navigator.serviceWorker.getRegistration();
-  if (swRegistration && typeof swRegistration.showNotification === 'function') {
-    await swRegistration.showNotification(reminder.title, options);
-    return;
-  }
-
-  const fallback = new Notification(reminder.title, options);
-  fallback.addEventListener('click', () => {
-    window.focus();
-    queueReminderAlert(reminder.id);
-  });
-}
-
-function bindServiceWorkerMessages() {
-  if (!('serviceWorker' in navigator)) {
-    return;
-  }
-
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    const data = event.data || {};
-    if (data.type !== 'notification-action') {
-      return;
-    }
-
-    processNotificationAction(data.action, data.reminderId);
-  });
-}
-
-function handleNotificationActionFromQuery() {
-  const params = new URLSearchParams(window.location.search);
-  const action = params.get('notificationAction');
-  const reminderId = params.get('reminderId');
-
-  if (!action || !reminderId) {
-    return;
-  }
-
-  processNotificationAction(action, reminderId);
-  params.delete('notificationAction');
-  params.delete('reminderId');
-  const newQuery = params.toString();
-  const nextUrl = `${window.location.pathname}${newQuery ? `?${newQuery}` : ''}${window.location.hash}`;
-  window.history.replaceState({}, '', nextUrl);
-}
-
-function processNotificationAction(action, reminderId) {
-  const reminder = reminders.find((item) => item.id === reminderId);
-  if (!reminder || reminder.status !== 'active') {
-    return;
-  }
-
-  if (action === 'done') {
-    markReminderDone(reminderId, false);
-    showToast('Zrobione z powiadomienia', 'success');
-    return;
-  }
-
-  if (action === 'snooze5') {
-    snoozeReminder(reminderId, 5, false);
-    showToast('Odłożono o 5 min', 'warning');
-    return;
-  }
-
-  if (action === 'snooze15') {
-    snoozeReminder(reminderId, 15, false);
-    showToast('Odłożono o 15 min', 'warning');
-    return;
-  }
-
-  if (action === 'snooze60') {
-    snoozeReminder(reminderId, 60, false);
-    showToast('Odłożono o 1 godz.', 'warning');
-    return;
-  }
-
-  queueReminderAlert(reminderId);
+  return `item-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function registerServiceWorker() {
@@ -950,6 +700,6 @@ async function registerServiceWorker() {
   try {
     await navigator.serviceWorker.register('service-worker.js');
   } catch (error) {
-    console.warn('Nie udało się zarejestrować service workera.', error);
+    console.warn('Nie udalo sie zarejestrowac service workera.', error);
   }
 }

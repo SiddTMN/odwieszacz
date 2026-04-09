@@ -1,10 +1,10 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="pl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#11161d" />
-  <meta name="description" content="odwieszacz - prosta aplikacja webowa do przypomnień głosowych i tekstowych" />
+  <meta name="theme-color" content="#f4f1e8" />
+  <meta name="description" content="odwieszacz - prosta aplikacja webowa do przypomnień i szybkich notatek głosowych" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="styles.css" />
@@ -12,124 +12,110 @@
 </head>
 <body>
   <main class="app">
-    <section class="hero" aria-label="Wprowadzenie">
+    <header class="app-header" aria-label="Naglowek aplikacji">
       <h1>odwieszacz</h1>
-      <p>Proste przypomnienia głosowe i tekstowe. Wszystko w jednym miejscu, dużymi przyciskami i bez zbędnych rzeczy.</p>
+      <p>Minimum krokow. Duze przyciski. Wszystko wazne na jednym ekranie.</p>
+    </header>
+
+    <section id="feedback-banner" class="feedback-banner" hidden aria-live="polite" aria-atomic="true"></section>
+
+    <section class="panel panel-strong recorder-panel" aria-labelledby="recorder-title">
+      <div class="section-head">
+        <h2 id="recorder-title">Szybka notatka glosowa</h2>
+        <div id="recording-status" class="status-badge">Gotowe do nagrywania</div>
+      </div>
+      <button class="record-button" id="record-button" type="button" aria-describedby="recording-help">
+        Nagraj notatke
+      </button>
+      <p id="recording-help" class="support-text">Dotknij raz, aby zaczac. Dotknij ponownie, aby zakonczyc i zapisac.</p>
+      <audio id="latest-note-preview" class="latest-note-preview" controls hidden></audio>
     </section>
 
-    <div class="grid">
-      <section class="panel" aria-labelledby="new-reminder-title">
+    <section class="panel" aria-labelledby="new-reminder-title">
+      <div class="section-head">
         <h2 id="new-reminder-title">Nowe przypomnienie</h2>
-        <form id="reminder-form" class="stack">
-          <div class="record-box">
-            <button class="record-button" id="record-button" type="button">Nagraj przypomnienie</button>
-            <div id="recording-status" class="status-pill">Mikrofon nieaktywny</div>
-            <audio id="audio-preview" class="audio-preview" controls hidden></audio>
-            <p class="hint">Kliknij, aby rozpocząć nagrywanie. Kliknij ponownie, aby zakończyć.</p>
-          </div>
-
-          <div>
-            <label class="label" for="title">Tytuł</label>
-            <input class="field" id="title" name="title" type="text" placeholder="Np. Wziąć leki" maxlength="120" required />
-          </div>
-
-          <div>
-            <label class="label" for="note">Notatka tekstowa</label>
-            <textarea id="note" name="note" placeholder="Opcjonalnie: krótka notatka"></textarea>
-          </div>
-
-          <div class="date-row">
-            <div>
-              <label class="label" for="date">Data</label>
-              <input id="date" name="date" type="date" required />
-            </div>
-            <div>
-              <label class="label" for="time">Godzina</label>
-              <input id="time" name="time" type="time" required />
-            </div>
-          </div>
-
-          <button class="primary-button" type="submit">Zapisz przypomnienie</button>
-          <p class="small-note">Dane zapisują się lokalnie w tej przeglądarce.</p>
-
-          <div id="notifications-panel" class="notification-panel" hidden>
-            <p id="notifications-text" class="small-note notification-text"></p>
-            <button id="enable-notifications-button" class="secondary-button" type="button">Włącz powiadomienia</button>
-          </div>
-        </form>
-      </section>
-
-      <div class="lists">
-        <section class="panel" aria-labelledby="list-now-title">
-          <h2 id="list-now-title">Na teraz</h2>
-          <div id="list-now" class="reminder-group"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="list-today-title">
-          <h2 id="list-today-title">Dzisiaj</h2>
-          <div id="list-today" class="reminder-group"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="list-overdue-title">
-          <h2 id="list-overdue-title">Spóźnione</h2>
-          <div id="list-overdue" class="reminder-group"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="checklist-title">
-          <div class="panel-header">
-            <h2 id="checklist-title">Wyjście z domu</h2>
-            <button class="secondary-button header-button" type="button" id="show-done-button">Pokaż zrobione</button>
-          </div>
-          <div id="checklist" class="checklist"></div>
-          <div class="footer-actions">
-            <button class="secondary-button" type="button" id="reset-checklist">Odznacz wszystko</button>
-          </div>
-        </section>
-
-        <section class="panel" aria-labelledby="done-title" id="done-panel" hidden>
-          <div class="panel-header">
-            <h2 id="done-title">Zrobione</h2>
-            <button class="secondary-button header-button" type="button" id="hide-done-button">Ukryj</button>
-          </div>
-          <p class="small-note done-summary" id="done-summary">Tutaj trafiają zakończone przypomnienia.</p>
-          <div id="list-done" class="reminder-group"></div>
-          <div class="footer-actions">
-            <button class="secondary-button" type="button" id="clear-old-done-button">Wyczyść starsze niż 7 dni</button>
-          </div>
-        </section>
+        <button class="secondary-button small-button" type="button" id="toggle-done-button">Pokaz zrobione</button>
       </div>
-    </div>
-  </main>
+      <form id="reminder-form" class="stack">
+        <div>
+          <label class="label" for="title">Co trzeba zrobic</label>
+          <input class="field" id="title" name="title" type="text" placeholder="Np. Wziac leki" maxlength="120" required />
+        </div>
 
-  <div id="action-toast" class="action-toast" hidden aria-live="polite" aria-atomic="true"></div>
-  <section id="reminder-alert" class="reminder-alert" hidden aria-live="assertive" aria-atomic="true">
-    <div class="reminder-alert-title" id="reminder-alert-title">Przypomnienie</div>
-    <p class="reminder-alert-note" id="reminder-alert-note"></p>
-    <div class="reminder-alert-actions">
-      <button class="primary-button" type="button" id="alert-done-button">Zrobione</button>
-      <button class="action-button" type="button" id="alert-snooze-5-button">Odłóż 5 min</button>
-      <button class="action-button" type="button" id="alert-snooze-15-button">Odłóż 15 min</button>
-      <button class="action-button" type="button" id="alert-snooze-60-button">Odłóż 1 godz.</button>
-    </div>
-  </section>
+        <div>
+          <label class="label" for="note">Krotka notatka</label>
+          <textarea id="note" name="note" placeholder="Np. Tabletki sa przy czajniku"></textarea>
+        </div>
+
+        <div class="date-row">
+          <div>
+            <label class="label" for="date">Data</label>
+            <input id="date" name="date" type="date" required />
+          </div>
+          <div>
+            <label class="label" for="time">Godzina</label>
+            <input id="time" name="time" type="time" required />
+          </div>
+        </div>
+
+        <button class="primary-button" type="submit">Zapisz przypomnienie</button>
+
+        <div id="notifications-panel" class="info-box" hidden>
+          <p id="notifications-text" class="support-text"></p>
+          <button id="enable-notifications-button" class="secondary-button" type="button">Wlacz powiadomienia</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel" aria-labelledby="active-title">
+      <div class="section-head">
+        <h2 id="active-title">Aktywne przypomnienia</h2>
+        <div id="active-count" class="count-badge">0</div>
+      </div>
+      <div id="active-reminders" class="reminder-list"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="voice-notes-title">
+      <div class="section-head">
+        <h2 id="voice-notes-title">Szybkie notatki glosowe</h2>
+        <div id="voice-note-count" class="count-badge">0</div>
+      </div>
+      <div id="voice-notes-list" class="voice-notes-list"></div>
+    </section>
+
+    <section class="panel done-panel" id="done-panel" hidden aria-labelledby="done-title">
+      <div class="section-head">
+        <h2 id="done-title">Zrobione</h2>
+        <button class="secondary-button small-button" type="button" id="clear-old-done-button">Wyczysc stare</button>
+      </div>
+      <p class="support-text" id="done-summary">Tutaj trafiaja zakonczone przypomnienia.</p>
+      <div id="done-reminders" class="reminder-list"></div>
+    </section>
+  </main>
 
   <template id="reminder-template">
     <article class="reminder-card">
-      <div class="reminder-top">
-        <div>
-          <div class="reminder-title"></div>
-          <div class="meta note-row"></div>
-        </div>
-        <div class="status-pill status-text"></div>
+      <div class="reminder-main">
+        <div class="reminder-title"></div>
+        <div class="reminder-time"></div>
+        <p class="reminder-note" hidden></p>
       </div>
-      <div class="meta schedule-row"></div>
-      <audio class="audio-player" controls hidden></audio>
-      <div class="actions">
-        <button class="action-button play-button" type="button">Odsłuchaj</button>
-        <button class="action-button done-button" type="button">Zrobione</button>
-        <button class="action-button snooze-button" type="button">Odłóż 5 min</button>
-        <button class="danger-button delete-button" type="button">Usuń</button>
+      <div class="reminder-actions">
+        <button class="primary-button done-button" type="button">Zrobione</button>
+        <button class="secondary-button snooze-button" type="button">Za 10 min</button>
+        <button class="danger-button delete-button" type="button">Usun</button>
       </div>
+    </article>
+  </template>
+
+  <template id="voice-note-template">
+    <article class="voice-note-card">
+      <div class="voice-note-top">
+        <div class="voice-note-title"></div>
+        <button class="danger-button note-delete-button" type="button">Usun</button>
+      </div>
+      <div class="voice-note-time"></div>
+      <audio class="voice-note-audio" controls></audio>
     </article>
   </template>
 

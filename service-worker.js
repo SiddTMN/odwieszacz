@@ -1,4 +1,4 @@
-const CACHE_NAME = 'odwieszacz-cache-v2';
+const CACHE_NAME = 'odwieszacz-cache-v3';
 const APP_SHELL = [
   './',
   './index.html',
@@ -46,14 +46,8 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-
-  const action = event.action || 'open';
-  const reminderId = event.notification.data && event.notification.data.reminderId
-    ? event.notification.data.reminderId
-    : '';
 
   event.waitUntil((async () => {
     const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -62,21 +56,11 @@ self.addEventListener('notificationclick', (event) => {
       if ('focus' in client) {
         await client.focus();
       }
-
-      client.postMessage({
-        type: 'notification-action',
-        action,
-        reminderId
-      });
       return;
     }
 
     if (clients.openWindow) {
-      const query = new URLSearchParams({
-        notificationAction: action,
-        reminderId
-      });
-      await clients.openWindow(`./?${query.toString()}`);
+      await clients.openWindow('./');
     }
   })());
 });
